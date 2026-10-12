@@ -1,0 +1,29 @@
+From 2ee5068d11abd6eb7c8f1f8bcaea4e40ba54b7cd Mon Sep 17 00:00:00 2001
+From: Simon Geljic <5978447+Geljic@users.noreply.github.com>
+Date: Mon, 12 Oct 2026 20:18:28 +1100
+Subject: [PATCH 6/6] Schema: walk PS2 strip lengths so visitors see them
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ packages/core/src/schema/types/staticMesh.ts | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/packages/core/src/schema/types/staticMesh.ts b/packages/core/src/schema/types/staticMesh.ts
+index 69c8536..c986fab 100644
+--- a/packages/core/src/schema/types/staticMesh.ts
++++ b/packages/core/src/schema/types/staticMesh.ts
+@@ -198,7 +198,10 @@ export class PS2StaticMeshBatch extends Struct {
+   stripLengths = field((ctx) => ctx.list(U32), {
+     custom: (ctx) => {
+       ctx.allocate(this.stripLengths, this.stripCount);
+-      ctx.forward(this.stripLengths, this.stripCount);
++      // walk (not forward) so the visitors and the JSON see the values
++      ctx.for(this.stripCount, (ctx) => {
++        ctx.walk((ctx) => ctx.index(this.stripLengths, (ctx) => ctx.iterator()));
++      });
+     },
+   });
+ }
+-- 
+2.54.0
+

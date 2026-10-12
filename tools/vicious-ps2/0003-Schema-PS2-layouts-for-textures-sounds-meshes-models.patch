@@ -1,0 +1,792 @@
+From dca787ec2614ba7558202d2c5c05c78a16fa4af0 Mon Sep 17 00:00:00 2001
+From: Simon Geljic <5978447+Geljic@users.noreply.github.com>
+Date: Mon, 12 Oct 2026 20:15:40 +1100
+Subject: [PATCH 3/6] Schema: PS2 layouts for textures, sounds, meshes, models,
+ materials, sky
+
+All conditional on ctx.platform() == 1, Xbox decoding is unchanged.
+Verified with vcs2json --strict on every .gam/.map/.ls/.cin/.loc of the
+PAL disc (710 files): every chunk ends exactly at its end offset.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../schema/types/dualTextureModelMaterial.ts  |   7 +-
+ packages/core/src/schema/types/dynamicMesh.ts | 190 +++++++++++++++++-
+ .../core/src/schema/types/dynamicModel.ts     |  21 +-
+ .../core/src/schema/types/imageTexture.ts     |  68 ++++++-
+ packages/core/src/schema/types/model.ts       |  76 ++++++-
+ .../types/singleTextureModelMaterial.ts       |   5 +-
+ packages/core/src/schema/types/sky.ts         |   6 +-
+ packages/core/src/schema/types/sound.ts       |  35 +++-
+ packages/core/src/schema/types/staticMesh.ts  |  90 ++++++++-
+ packages/core/src/schema/types/texture.ts     |   2 +
+ packages/core/src/schema/types/v248.ts        |   9 +
+ packages/core/src/schema/types/v314.ts        |   5 +-
+ 12 files changed, 488 insertions(+), 26 deletions(-)
+
+diff --git a/packages/core/src/schema/types/dualTextureModelMaterial.ts b/packages/core/src/schema/types/dualTextureModelMaterial.ts
+index b5cda40..a38ca10 100644
+--- a/packages/core/src/schema/types/dualTextureModelMaterial.ts
++++ b/packages/core/src/schema/types/dualTextureModelMaterial.ts
+@@ -26,7 +26,12 @@ export class DualTextureModelMaterialShader extends Struct {
+   __offset = 0xf7410;
+ 
+   _ = deprecated((ctx) => ctx.eq((ctx) => ctx.version(), 0));
++  /** Xbox only: the PS2 shader chunk is empty */
+   f_0x160 = field(AssetFromType, {
+-    condition: (ctx) => ctx.neq((ctx) => ctx.version(), 0),
++    condition: (ctx) =>
++      ctx.and(
++        (ctx) => ctx.neq((ctx) => ctx.version(), 0),
++        (ctx) => ctx.neq((ctx) => ctx.platform(), 1)
++      ),
+   });
+ }
+diff --git a/packages/core/src/schema/types/dynamicMesh.ts b/packages/core/src/schema/types/dynamicMesh.ts
+index a200846..c2e993d 100644
+--- a/packages/core/src/schema/types/dynamicMesh.ts
++++ b/packages/core/src/schema/types/dynamicMesh.ts
+@@ -1,10 +1,10 @@
+-import { Class, Struct, deprecated, field } from "../core";
++import { Class, CodeContext, Struct, deprecated, field } from "../core";
+ import { BOOL, I32, U8, U16, U32 } from "./atomic";
+ import { U8Buffer } from "./buffer";
+ import { Label } from "./label";
+ import { Matrix3, Transform, TransformList, Vector3 } from "./math";
+ import { Mesh } from "./mesh";
+-import { V20_9 } from "./staticMesh";
++import { PS2StaticMeshBatch, PS2StaticMeshGroup, V20_9 } from "./staticMesh";
+ 
+ export class DynamicMesh extends Class {
+   __id = 28;
+@@ -243,7 +243,7 @@ export class DynamicMeshBody extends Struct {
+ 
+   enabled = field(BOOL);
+   meshSections = field((ctx) => ctx.array(MeshSection, 32), {
+-    condition: (ctx) => ctx.isTrue(this.enabled),
++    condition: (ctx) => isXboxEnabled(ctx, this.enabled),
+     custom: (ctx) => {
+       ctx.for(32, (ctx) => {
+         ctx.walk((ctx) =>
+@@ -253,12 +253,12 @@ export class DynamicMeshBody extends Struct {
+     },
+   });
+   riggedBufferCount = field(U32, {
+-    condition: (ctx) => ctx.isTrue(this.enabled),
++    condition: (ctx) => isXboxEnabled(ctx, this.enabled),
+   });
+   riggedVertexBuffer = field(U8Buffer, {
+     condition: (ctx) =>
+       ctx.and(
+-        (ctx) => ctx.isTrue(this.enabled),
++        (ctx) => isXboxEnabled(ctx, this.enabled),
+         (ctx) => ctx.gt((ctx) => ctx.shl(this.riggedBufferCount, 5), 0)
+       ),
+     custom: (ctx) => {
+@@ -273,7 +273,7 @@ export class DynamicMeshBody extends Struct {
+   riggedJointWeightBuffer = field(U8Buffer, {
+     condition: (ctx) =>
+       ctx.and(
+-        (ctx) => ctx.isTrue(this.enabled),
++        (ctx) => isXboxEnabled(ctx, this.enabled),
+         (ctx) => ctx.gt((ctx) => ctx.shl(this.riggedBufferCount, 2), 0)
+       ),
+     custom: (ctx) => {
+@@ -286,12 +286,12 @@ export class DynamicMeshBody extends Struct {
+     },
+   });
+   staticVertexBufferCount = field(U32, {
+-    condition: (ctx) => ctx.isTrue(this.enabled),
++    condition: (ctx) => isXboxEnabled(ctx, this.enabled),
+   });
+   staticVertexBuffer = field(U8Buffer, {
+     condition: (ctx) =>
+       ctx.and(
+-        (ctx) => ctx.isTrue(this.enabled),
++        (ctx) => isXboxEnabled(ctx, this.enabled),
+         (ctx) => ctx.gt((ctx) => ctx.mul(this.staticVertexBufferCount, 16), 0)
+       ),
+     custom: (ctx) => {
+@@ -304,12 +304,12 @@ export class DynamicMeshBody extends Struct {
+     },
+   });
+   indexBufferCount = field(U32, {
+-    condition: (ctx) => ctx.isTrue(this.enabled),
++    condition: (ctx) => isXboxEnabled(ctx, this.enabled),
+   });
+   indexBuffer = field(U8Buffer, {
+     condition: (ctx) =>
+       ctx.and(
+-        (ctx) => ctx.isTrue(this.enabled),
++        (ctx) => isXboxEnabled(ctx, this.enabled),
+         (ctx) => ctx.gt((ctx) => ctx.mul(this.indexBufferCount, 2), 0)
+       ),
+     custom: (ctx) => {
+@@ -321,4 +321,174 @@ export class DynamicMeshBody extends Struct {
+       ctx.walk();
+     },
+   });
++  /** PS2 only: the rigid part: groups move with one joint slot each (vicious' Xbox "static" ranges) */
++  ps2Rigid = field(PS2SkinnedPart, {
++    condition: (ctx) => isPS2Enabled(ctx, this.enabled),
++    custom: (ctx) => {
++      ctx.set(this.ps2Rigid.rigid, true);
++      ctx.walk();
++    },
++  });
++  /** PS2 only: the smooth-skinned part, 16 bytes per vertex (vicious' Xbox "rigged" buffers) */
++  ps2Skinned = field(PS2SkinnedPart, {
++    condition: (ctx) => isPS2Enabled(ctx, this.enabled),
++    custom: (ctx) => {
++      ctx.set(this.ps2Skinned.rigid, false);
++      ctx.walk();
++    },
++  });
++  /** PS2 only: 32 lists (one per section) of SkinMeshFrame */
++  ps2Frames = field((ctx) => ctx.array(PS2SkinFrameList, 32), {
++    condition: (ctx) => isPS2Enabled(ctx, this.enabled),
++  });
++}
++
++function isXboxEnabled(ctx: CodeContext, enabled: any) {
++  return ctx.and(
++    (ctx) => ctx.isTrue(enabled),
++    (ctx) => ctx.neq((ctx) => ctx.platform(), 1)
++  );
++}
++
++function isPS2Enabled(ctx: CodeContext, enabled: any) {
++  return ctx.and(
++    (ctx) => ctx.isTrue(enabled),
++    (ctx) => ctx.eq((ctx) => ctx.platform(), 1)
++  );
++}
++
++/**
++ * PS2 dynamic mesh part (DynamicMesh v6 body). groupCount = sum of sectionCounts; sectionCounts[i]
++ * groups belong to section i (a joint/matrix slot). Blobs are u32 size + bytes, sliced per batch with
++ * each slice padded to 16 bytes:
++ *   rigid:   blob0 positions int16x3, blob1 normals int16x3, blob2 UVs int16x2, blob3 strip indices u8
++ *            (the same four blobs as a static mesh, notes/formats.md#render-mesh)
++ *   skinned: blob0 vertices, 16 bytes each, size given in quadwords; blob1 UVs int16x2; blob2 strips u8
++ * Groups use the static mesh batch layout.
++ */
++export class PS2SkinnedPart extends Struct {
++  rigid = field(BOOL, { skip: true });
++  groupCount = field(U32);
++  sectionCounts = field((ctx) => ctx.array(U8, 32));
++  blob0QuadWords = field(U32, {
++    condition: (ctx) =>
++      ctx.and(
++        (ctx) => ctx.gt(this.groupCount, 0),
++        (ctx) => ctx.isFalse(this.rigid)
++      ),
++  });
++  blob0 = field(U8Buffer, {
++    condition: (ctx) => ctx.gt(this.groupCount, 0),
++    custom: (ctx) => {
++      ctx.if(
++        (ctx) => ctx.isTrue(this.rigid),
++        (ctx) => ctx.set(this.blob0.consume, true),
++        (ctx) => {
++          ctx.set(this.blob0.consume, false);
++          ctx.set(this.blob0.size, (ctx) => ctx.mul(this.blob0QuadWords, 16));
++        }
++      );
++      ctx.walk();
++    },
++  });
++  blob1 = field(U8Buffer, {
++    condition: (ctx) => ctx.gt(this.groupCount, 0),
++    custom: (ctx) => {
++      ctx.set(this.blob1.consume, true);
++      ctx.walk();
++    },
++  });
++  blob2 = field(U8Buffer, {
++    condition: (ctx) => ctx.gt(this.groupCount, 0),
++    custom: (ctx) => {
++      ctx.set(this.blob2.consume, true);
++      ctx.walk();
++    },
++  });
++  blob3 = field(U8Buffer, {
++    condition: (ctx) =>
++      ctx.and(
++        (ctx) => ctx.gt(this.groupCount, 0),
++        (ctx) => ctx.isTrue(this.rigid)
++      ),
++    custom: (ctx) => {
++      ctx.set(this.blob3.consume, true);
++      ctx.walk();
++    },
++  });
++  sections = field((ctx) => ctx.array(PS2SkinSection, 32), {
++    condition: (ctx) => ctx.gt(this.groupCount, 0),
++    custom: (ctx) => {
++      ctx.for(32, (ctx) => {
++        ctx.set(
++          ctx.index(this.sections, (ctx) => ctx.iterator()).rigid,
++          this.rigid
++        );
++        ctx.set(
++          ctx.index(this.sections, (ctx) => ctx.iterator()).count,
++          (ctx) => ctx.index(this.sectionCounts, (ctx) => ctx.iterator())
++        );
++        ctx.walk((ctx) => ctx.index(this.sections, (ctx) => ctx.iterator()));
++      });
++    },
++  });
++}
++
++export class PS2SkinSection extends Struct {
++  rigid = field(BOOL, { skip: true });
++  count = field(U8, { skip: true });
++  /** Rigid part: same layout as a static mesh group */
++  rigidGroups = field((ctx) => ctx.list(PS2StaticMeshGroup), {
++    condition: (ctx) =>
++      ctx.and(
++        (ctx) => ctx.isTrue(this.rigid),
++        (ctx) => ctx.gt(this.count, 0)
++      ),
++    custom: (ctx) => {
++      ctx.allocate(this.rigidGroups, this.count);
++      ctx.for(this.count, (ctx) => {
++        ctx.walk((ctx) => ctx.index(this.rigidGroups, (ctx) => ctx.iterator()));
++      });
++    },
++  });
++  /** Skinned part: no material slot */
++  skinnedGroups = field((ctx) => ctx.list(PS2SkinnedGroup), {
++    condition: (ctx) =>
++      ctx.and(
++        (ctx) => ctx.isFalse(this.rigid),
++        (ctx) => ctx.gt(this.count, 0)
++      ),
++    custom: (ctx) => {
++      ctx.allocate(this.skinnedGroups, this.count);
++      ctx.for(this.count, (ctx) => {
++        ctx.walk((ctx) => ctx.index(this.skinnedGroups, (ctx) => ctx.iterator()));
++      });
++    },
++  });
++}
++
++export class PS2SkinnedGroup extends Struct {
++  f_1 = field(U32);
++  batchCount = field(U32);
++  f_2 = field(U32);
++  batches = field((ctx) => ctx.list(PS2StaticMeshBatch), {
++    custom: (ctx) => {
++      ctx.allocate(this.batches, this.batchCount);
++      ctx.for(this.batchCount, (ctx) => {
++        ctx.walk((ctx) => ctx.index(this.batches, (ctx) => ctx.iterator()));
++      });
++    },
++  });
++}
++
++export class PS2SkinFrameList extends Struct {
++  count = field(U32);
++  list = field((ctx) => ctx.list(SkinMeshFrame), {
++    custom: (ctx) => {
++      ctx.allocate(this.list, this.count);
++      ctx.for(this.count, (ctx) => {
++        ctx.walk((ctx) => ctx.index(this.list, (ctx) => ctx.iterator()));
++      });
++    },
++  });
+ }
+diff --git a/packages/core/src/schema/types/dynamicModel.ts b/packages/core/src/schema/types/dynamicModel.ts
+index 3a2f7f5..8c014ab 100644
+--- a/packages/core/src/schema/types/dynamicModel.ts
++++ b/packages/core/src/schema/types/dynamicModel.ts
+@@ -1,5 +1,7 @@
+ import { Class, Struct, field } from "../core";
+-import { BOOL } from "./atomic";
++import { BOOL, U32 } from "./atomic";
++import { isPS2Enabled, readGroupsToChunkEnd } from "./model";
++import { PS2StaticMeshGroup } from "./staticMesh";
+ import { U8Buffer } from "./buffer";
+ import { DynamicGeom } from "./dynamicGeom";
+ 
+@@ -19,6 +21,7 @@ export class DynamicModelVertexData extends Struct {
+ 
+   enabled = field(BOOL);
+   buffer = field(U8Buffer, {
++    condition: (ctx) => ctx.neq((ctx) => ctx.platform(), 1),
+     custom: (ctx) => {
+       ctx.if(
+         (ctx) => ctx.isTrue(this.enabled),
+@@ -29,4 +32,20 @@ export class DynamicModelVertexData extends Struct {
+       );
+     },
+   });
++  /** PS2 only: one 16-bit colour per vertex, sliced per batch, slices padded to 16 bytes */
++  ps2Colors = field(U8Buffer, {
++    condition: (ctx) => isPS2Enabled(ctx, this.enabled),
++    custom: (ctx) => {
++      ctx.set(this.ps2Colors.consume, true);
++      ctx.walk();
++    },
++  });
++  ps2GroupCount = field(U32, { skip: true });
++  /** PS2 only: copy of the mesh's group/batch table; no count in the file, runs to the chunk end */
++  ps2Groups = field((ctx) => ctx.list(PS2StaticMeshGroup, 1024), {
++    condition: (ctx) => isPS2Enabled(ctx, this.enabled),
++    custom: (ctx) => {
++      readGroupsToChunkEnd(ctx, this.ps2Groups, this.ps2GroupCount);
++    },
++  });
+ }
+diff --git a/packages/core/src/schema/types/imageTexture.ts b/packages/core/src/schema/types/imageTexture.ts
+index 807b1bc..41333a1 100644
+--- a/packages/core/src/schema/types/imageTexture.ts
++++ b/packages/core/src/schema/types/imageTexture.ts
+@@ -1,5 +1,5 @@
+ import { Class, Struct, field } from "../core";
+-import { BOOL, U8, U32 } from "./atomic";
++import { BOOL, U8, U16, U32 } from "./atomic";
+ import { U8Buffer } from "./buffer";
+ import { Texture } from "./texture";
+ 
+@@ -42,17 +42,63 @@ export class ImageTextureBuffer extends Struct {
+   width = field(U32, { skip: true });
+   height = field(U32, { skip: true });
+   enabled = field(BOOL);
+-  levels = field(U32, { condition: (ctx) => ctx.isTrue(this.enabled) });
++  /** PS2 only: the buffer repeats the texture size */
++  ps2Width = field(U16, {
++    condition: (ctx) =>
++      ctx.and(
++        (ctx) => ctx.isTrue(this.enabled),
++        (ctx) => ctx.eq((ctx) => ctx.platform(), 1)
++      ),
++  });
++  ps2Height = field(U16, {
++    condition: (ctx) =>
++      ctx.and(
++        (ctx) => ctx.isTrue(this.enabled),
++        (ctx) => ctx.eq((ctx) => ctx.platform(), 1)
++      ),
++  });
++  levels = field(U32, {
++    condition: (ctx) =>
++      ctx.and(
++        (ctx) => ctx.isTrue(this.enabled),
++        (ctx) => ctx.neq((ctx) => ctx.platform(), 1)
++      ),
++  });
++  /** PS2 only: mip level count is a u8 */
++  ps2Levels = field(U8, {
++    condition: (ctx) =>
++      ctx.and(
++        (ctx) => ctx.isTrue(this.enabled),
++        (ctx) => ctx.eq((ctx) => ctx.platform(), 1)
++      ),
++  });
++  /** PS2 only: one byte after the level count (seen 0) */
++  ps2Pad = field(U8, {
++    condition: (ctx) =>
++      ctx.and(
++        (ctx) => ctx.isTrue(this.enabled),
++        (ctx) => ctx.eq((ctx) => ctx.platform(), 1)
++      ),
++  });
+   pixels = field(U8Buffer, {
+     condition: (ctx) => ctx.isTrue(this.enabled),
+     custom: (ctx) => {
+       const size = ctx.var(U32, 0);
+       const width = ctx.var(U32, this.width);
+       const height = ctx.var(U32, this.height);
++      const levels = ctx.var(U32, this.levels);
++      ctx.if(
++        (ctx) => ctx.eq((ctx) => ctx.platform(), 1),
++        (ctx) => ctx.set(levels, this.ps2Levels)
++      );
+ 
+-      ctx.for(this.levels, (ctx) => {
++      ctx.for(levels, (ctx) => {
+         ctx.if(
+-          (ctx) => ctx.eq(this.format, 1),
++          (ctx) =>
++            ctx.and(
++              (ctx) => ctx.eq(this.format, 1),
++              (ctx) => ctx.neq((ctx) => ctx.platform(), 1)
++            ),
+           (ctx) => {
+             ctx.set(size, (ctx) =>
+               ctx.add(size, (ctx) =>
+@@ -80,7 +126,11 @@ export class ImageTextureBuffer extends Struct {
+     condition: (ctx) =>
+       ctx.and(
+         (ctx) => ctx.isTrue(this.enabled),
+-        (ctx) => ctx.eq(this.format, 3)
++        (ctx) =>
++          ctx.or(
++            (ctx) => ctx.eq(this.format, 3),
++            (ctx) => ctx.eq((ctx) => ctx.platform(), 1)
++          )
+       ),
+     custom: (ctx) => {
+       ctx.set(this.palette.consume, false);
+@@ -88,4 +138,12 @@ export class ImageTextureBuffer extends Struct {
+       ctx.walk();
+     },
+   });
++  /** PS2 only: one byte after the palette */
++  ps2Trailer = field(U8, {
++    condition: (ctx) =>
++      ctx.and(
++        (ctx) => ctx.isTrue(this.enabled),
++        (ctx) => ctx.eq((ctx) => ctx.platform(), 1)
++      ),
++  });
+ }
+diff --git a/packages/core/src/schema/types/model.ts b/packages/core/src/schema/types/model.ts
+index ec81d4a..ad9b3b4 100644
+--- a/packages/core/src/schema/types/model.ts
++++ b/packages/core/src/schema/types/model.ts
+@@ -1,7 +1,9 @@
+-import { Class, Struct, field } from "../core";
+-import { BOOL } from "./atomic";
++import { Class, CodeContext, Struct, field } from "../core";
++import { AssetReference } from "./asset";
++import { BOOL, U32 } from "./atomic";
+ import { U8Buffer } from "./buffer";
+ import { Transform } from "./math";
++import { PS2StaticMeshGroup } from "./staticMesh";
+ import { StaticGeom } from "./staticGeom";
+ 
+ export class Model extends Class {
+@@ -19,6 +21,7 @@ export class VertexBuffer extends Struct {
+ 
+   enabled = field(BOOL);
+   buffer = field(U8Buffer, {
++    condition: (ctx) => ctx.neq((ctx) => ctx.platform(), 1),
+     custom: (ctx) => {
+       ctx.if(
+         (ctx) => ctx.isTrue(this.enabled),
+@@ -29,4 +32,73 @@ export class VertexBuffer extends Struct {
+       );
+     },
+   });
++  /** PS2 only: the static mesh these vertex colours belong to */
++  ps2Mesh = field(AssetReference, {
++    condition: (ctx) => isPS2Enabled(ctx, this.enabled),
++  });
++  /**
++   * PS2 only: one 16-bit colour per vertex of ps2Mesh, sliced per batch in the mesh's batch
++   * order, each slice padded to 16 bytes
++   */
++  ps2Colors = field(U8Buffer, {
++    condition: (ctx) => isPS2Enabled(ctx, this.enabled),
++    custom: (ctx) => {
++      ctx.set(this.ps2Colors.consume, true);
++      ctx.walk();
++    },
++  });
++  ps2GroupCount = field(U32, { skip: true });
++  /** PS2 only: a copy of the mesh's group/batch table. No count in the file: it runs to the chunk end */
++  ps2Groups = field((ctx) => ctx.list(PS2StaticMeshGroup, 1024), {
++    condition: (ctx) => isPS2Enabled(ctx, this.enabled),
++    custom: (ctx) => {
++      readGroupsToChunkEnd(ctx, this.ps2Groups, this.ps2GroupCount);
++    },
++  });
++}
++
++/**
++ * PS2: read PS2StaticMeshGroup entries until the end of the current chunk (the file has no
++ * count). The decoder stops at end(); the other backends emit end() as 1 and use `count`,
++ * which the decoder filled in.
++ */
++export function readGroupsToChunkEnd(ctx: CodeContext, list: any, count: any) {
++  ctx.allocate(list);
++  ctx.set(count, 0);
++  ctx.loop((ctx) => {
++    const i = ctx.var(U32, (ctx) => ctx.iterator());
++    ctx.if(
++      (ctx) =>
++        ctx.or(
++          (ctx) => ctx.gte(i, 1024),
++          (ctx) =>
++            ctx.or(
++              (ctx) =>
++                ctx.and(
++                  (ctx) => ctx.neq((ctx) => ctx.end(), 1),
++                  (ctx) =>
++                    ctx.gte(
++                      (ctx) => ctx.add((ctx) => ctx.tell(), 3),
++                      (ctx) => ctx.end()
++                    )
++                ),
++              (ctx) =>
++                ctx.and(
++                  (ctx) => ctx.eq((ctx) => ctx.end(), 1),
++                  (ctx) => ctx.gte(i, count)
++                )
++            )
++        ),
++      (ctx) => ctx.break()
++    );
++    ctx.walk((ctx) => ctx.index(list, i));
++    ctx.set(count, (ctx) => ctx.add(i, 1));
++  });
++}
++
++export function isPS2Enabled(ctx: CodeContext, enabled: any) {
++  return ctx.and(
++    (ctx) => ctx.isTrue(enabled),
++    (ctx) => ctx.eq((ctx) => ctx.platform(), 1)
++  );
+ }
+diff --git a/packages/core/src/schema/types/singleTextureModelMaterial.ts b/packages/core/src/schema/types/singleTextureModelMaterial.ts
+index 4c128f2..fde35cf 100644
+--- a/packages/core/src/schema/types/singleTextureModelMaterial.ts
++++ b/packages/core/src/schema/types/singleTextureModelMaterial.ts
+@@ -22,5 +22,8 @@ export class SingleTextureModelMaterialShader extends Struct {
+   __metadata = true;
+   __offset = 0xf4930;
+ 
+-  data = field(AssetFromType);
++  /** Xbox only: the PS2 shader chunk is empty */
++  data = field(AssetFromType, {
++    condition: (ctx) => ctx.neq((ctx) => ctx.platform(), 1),
++  });
+ }
+diff --git a/packages/core/src/schema/types/sky.ts b/packages/core/src/schema/types/sky.ts
+index 36eb24e..e9740c5 100644
+--- a/packages/core/src/schema/types/sky.ts
++++ b/packages/core/src/schema/types/sky.ts
+@@ -1,5 +1,5 @@
+ import { Class, field } from "../core";
+-import { AssetReferenceSizedList } from "./asset";
++import { AssetFromTypeSizedList, AssetReferenceSizedList } from "./asset";
+ import { Group } from "./group";
+ import { Color } from "./math";
+ import { Object } from "./object";
+@@ -22,4 +22,8 @@ export class Sky extends Class {
+     condition: (ctx) => ctx.gt((ctx) => ctx.version(), 1),
+   });
+   f_0x44 = field(AssetReferenceSizedList);
++  /** PS2 only (seen in v3): typed list of the sky dome Model instances (with vertex colours) */
++  ps2Models = field(AssetFromTypeSizedList, {
++    condition: (ctx) => ctx.eq((ctx) => ctx.platform(), 1),
++  });
+ }
+diff --git a/packages/core/src/schema/types/sound.ts b/packages/core/src/schema/types/sound.ts
+index 1f94253..91ff4cd 100644
+--- a/packages/core/src/schema/types/sound.ts
++++ b/packages/core/src/schema/types/sound.ts
+@@ -45,12 +45,36 @@ export class SoundBuffer extends Struct {
+   enabled = field(BOOL);
+   sampleRate = field(U32, { condition: (ctx) => ctx.isTrue(this.enabled) });
+   fmtChunk = field(WAVFmtChunk, {
++    condition: (ctx) =>
++      ctx.and(
++        (ctx) =>
++          ctx.and(
++            (ctx) => ctx.isTrue(this.enabled),
++            (ctx) => ctx.isFalse(this.disabled)
++          ),
++        (ctx) => ctx.neq((ctx) => ctx.platform(), 1)
++      ),
++  });
++  /** PS2 only: unknown float (0.57 in the first sample seen) */
++  ps2F32 = field(F32, {
+     condition: (ctx) =>
+       ctx.and(
+         (ctx) => ctx.isTrue(this.enabled),
+-        (ctx) => ctx.isFalse(this.disabled)
++        (ctx) => ctx.eq((ctx) => ctx.platform(), 1)
++      ),
++  });
++  /**
++   * PS2 only: number of 16-byte PS-ADPCM blocks in data. Also present when the Sound is
++   * disabled (no inline data), then with a larger value (streamed elsewhere?)
++   */
++  ps2BlockCount = field(U32, {
++    condition: (ctx) =>
++      ctx.and(
++        (ctx) => ctx.isTrue(this.enabled),
++        (ctx) => ctx.eq((ctx) => ctx.platform(), 1)
+       ),
+   });
++  /** Xbox: WAV data (u32 size + bytes). PS2: ps2BlockCount x 16 bytes of PS-ADPCM, mono */
+   data = field(U8Buffer, {
+     condition: (ctx) =>
+       ctx.and(
+@@ -58,7 +82,14 @@ export class SoundBuffer extends Struct {
+         (ctx) => ctx.isFalse(this.disabled)
+       ),
+     custom: (ctx) => {
+-      ctx.set(this.data.consume, true);
++      ctx.if(
++        (ctx) => ctx.eq((ctx) => ctx.platform(), 1),
++        (ctx) => {
++          ctx.set(this.data.consume, false);
++          ctx.set(this.data.size, (ctx) => ctx.mul(this.ps2BlockCount, 16));
++        },
++        (ctx) => ctx.set(this.data.consume, true)
++      );
+       ctx.walk();
+     },
+   });
+diff --git a/packages/core/src/schema/types/staticMesh.ts b/packages/core/src/schema/types/staticMesh.ts
+index 1428c65..e825190 100644
+--- a/packages/core/src/schema/types/staticMesh.ts
++++ b/packages/core/src/schema/types/staticMesh.ts
+@@ -1,5 +1,5 @@
+ import { Class, Struct, deprecated, field } from "../core";
+-import { BOOL, I16, I32, U8, U16, U32 } from "./atomic";
++import { BOOL, F32, I16, I32, U8, U16, U32 } from "./atomic";
+ import { U8Buffer, U16Buffer } from "./buffer";
+ import { Color, Vector3 } from "./math";
+ import { Mesh } from "./mesh";
+@@ -113,7 +113,93 @@ export class V20_5 extends Struct {
+   _ = deprecated((ctx) => ctx.eq((ctx) => ctx.version(), 0));
+   enabled = field(BOOL);
+   buffers = field(V20_6, {
+-    condition: (ctx) => ctx.isTrue(this.enabled),
++    condition: (ctx) =>
++      ctx.and(
++        (ctx) => ctx.isTrue(this.enabled),
++        (ctx) => ctx.neq((ctx) => ctx.platform(), 1)
++      ),
++  });
++  /** PS2 only: VU1-style strip batches instead of the Xbox vertex/index buffers */
++  ps2Buffers = field(PS2StaticMeshBuffers, {
++    condition: (ctx) =>
++      ctx.and(
++        (ctx) => ctx.isTrue(this.enabled),
++        (ctx) => ctx.eq((ctx) => ctx.platform(), 1)
++      ),
++  });
++}
++
++/**
++ * PS2 render data of a static mesh. Four blobs, each sliced per batch with every slice
++ * padded to 16 bytes: positions int16x3, normals int16x3 (/4096), UVs int16x2 (/4096),
++ * strip indices u8 (bit 7 = no triangle / strip restart). See spy-vs-spy notes/formats.md#render-mesh.
++ */
++export class PS2StaticMeshBuffers extends Struct {
++  positions = field(U8Buffer, {
++    custom: (ctx) => {
++      ctx.set(this.positions.consume, true);
++      ctx.walk();
++    },
++  });
++  normals = field(U8Buffer, {
++    custom: (ctx) => {
++      ctx.set(this.normals.consume, true);
++      ctx.walk();
++    },
++  });
++  uvs = field(U8Buffer, {
++    custom: (ctx) => {
++      ctx.set(this.uvs.consume, true);
++      ctx.walk();
++    },
++  });
++  strips = field(U8Buffer, {
++    custom: (ctx) => {
++      ctx.set(this.strips.consume, true);
++      ctx.walk();
++    },
++  });
++  groupCount = field(U32);
++  groups = field((ctx) => ctx.list(PS2StaticMeshGroup), {
++    custom: (ctx) => {
++      ctx.allocate(this.groups, this.groupCount);
++
++      ctx.for(this.groupCount, (ctx) => {
++        ctx.walk((ctx) => ctx.index(this.groups, (ctx) => ctx.iterator()));
++      });
++    },
++  });
++}
++
++export class PS2StaticMeshGroup extends Struct {
++  /** Material slot in the owning object's material list; bit 15 is a flag */
++  material = field(U16);
++  f_1 = field(U32);
++  batchCount = field(U32);
++  f_2 = field(U32);
++  batches = field((ctx) => ctx.list(PS2StaticMeshBatch), {
++    custom: (ctx) => {
++      ctx.allocate(this.batches, this.batchCount);
++
++      ctx.for(this.batchCount, (ctx) => {
++        ctx.walk((ctx) => ctx.index(this.batches, (ctx) => ctx.iterator()));
++      });
++    },
++  });
++}
++
++export class PS2StaticMeshBatch extends Struct {
++  /** Vertices in this batch (at most 76) */
++  vertexCount = field(U32);
++  center = field(Vector3);
++  radius = field(F32);
++  stripCount = field(U32);
++  /** Length in bytes of each strip in the strips blob */
++  stripLengths = field((ctx) => ctx.list(U32), {
++    custom: (ctx) => {
++      ctx.allocate(this.stripLengths, this.stripCount);
++      ctx.forward(this.stripLengths, this.stripCount);
++    },
+   });
+ }
+ 
+diff --git a/packages/core/src/schema/types/texture.ts b/packages/core/src/schema/types/texture.ts
+index 9c9ee7e..ec501b6 100644
+--- a/packages/core/src/schema/types/texture.ts
++++ b/packages/core/src/schema/types/texture.ts
+@@ -58,4 +58,6 @@ export class Texture extends Class {
+   });
+   width = field(U16);
+   height = field(U16);
++  /** PS2 only: one extra byte after the size (seen 0) */
++  ps2Flags = field(U8, { condition: (ctx) => ctx.eq((ctx) => ctx.platform(), 1) });
+ }
+diff --git a/packages/core/src/schema/types/v248.ts b/packages/core/src/schema/types/v248.ts
+index 53cb487..657e43e 100644
+--- a/packages/core/src/schema/types/v248.ts
++++ b/packages/core/src/schema/types/v248.ts
+@@ -1,4 +1,6 @@
+ import { Class, field } from "../core";
++import { AssetFromTypeWrap } from "./asset";
++import { U32 } from "./atomic";
+ import { V368 } from "./v368";
+ 
+ export class V248 extends Class {
+@@ -7,4 +9,11 @@ export class V248 extends Class {
+   __offset = 0x2c640;
+ 
+   base = field(V368);
++  /** Seen on PS2 (v10): a u32, then a wrapped typed asset (usually -1). Meaning unknown */
++  f_1 = field(U32, {
++    condition: (ctx) => ctx.eq((ctx) => ctx.platform(), 1),
++  });
++  f_2 = field(AssetFromTypeWrap, {
++    condition: (ctx) => ctx.eq((ctx) => ctx.platform(), 1),
++  });
+ }
+diff --git a/packages/core/src/schema/types/v314.ts b/packages/core/src/schema/types/v314.ts
+index d55d4c7..b02af45 100644
+--- a/packages/core/src/schema/types/v314.ts
++++ b/packages/core/src/schema/types/v314.ts
+@@ -27,5 +27,8 @@ export class V314_1 extends Struct {
+   __metadata = true;
+   __offset = 0xf5760;
+ 
+-  f_1 = field(AssetFromType);
++  /** Xbox only: the PS2 shader chunk is empty */
++  f_1 = field(AssetFromType, {
++    condition: (ctx) => ctx.neq((ctx) => ctx.platform(), 1),
++  });
+ }
+-- 
+2.54.0
+

@@ -1,0 +1,353 @@
+From e2da9bfa697cc9ffbaa1100c1da56f6abcd4e27b Mon Sep 17 00:00:00 2001
+From: Simon Geljic <5978447+Geljic@users.noreply.github.com>
+Date: Mon, 12 Oct 2026 20:15:40 +1100
+Subject: [PATCH 2/6] vcs2json: --strict, --ps2, --types, --stats and JSON
+ nesting fixes
+
+--strict stops at the first error and prints the chunk stack; --types tags
+class objects with __class/__id; --stats prints chunk counts per version.
+Fixes: a list directly after a list no longer nests inside it, fixed arrays
+of atoms get their values, no ++ptr in the same expression as its use.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ apps/json/src/vcs2json.c | 211 ++++++++++++++++++++++++++++++++++-----
+ 1 file changed, 187 insertions(+), 24 deletions(-)
+
+diff --git a/apps/json/src/vcs2json.c b/apps/json/src/vcs2json.c
+index b1cc99f..dba9006 100644
+--- a/apps/json/src/vcs2json.c
++++ b/apps/json/src/vcs2json.c
+@@ -1,7 +1,14 @@
+ #include <cJSON.h>
+ #include <vicious.h>
+ 
++#include <setjmp.h>
++#include <signal.h>
++#ifdef __GLIBC__
++#include <execinfo.h>
++#endif
+ #include <stdio.h>
++#include <stdlib.h>
++#include <unistd.h>
+ #include <string.h>
+ 
+ #define ARENA_SIZE 32 * 1024 * 1024
+@@ -16,17 +23,34 @@
+ typedef struct {
+     VisitorContext ctx;
+ 
+-    cJSON *nodes[255];
+-    uint8_t ptr;
++    cJSON *nodes[4096]; /* deep PS2 script trees overflow 255 */
++    uint32_t ptr;
+ 
+     const char *field;
+ } Visitor;
+ 
++/* Set the value of the current field; fixed arrays of atoms (e.g. U8[32]) hold it as an array element */
++static void jsonSetValue(Visitor *ctx, cJSON *item) {
++    cJSON *parent = ctx->nodes[ctx->ptr - 1];
++
++    if (cJSON_IsArray(parent)) {
++        cJSON_ReplaceItemViaPointer(parent, ctx->nodes[ctx->ptr], item);
++        ctx->nodes[ctx->ptr] = item;
++    } else {
++        cJSON_ReplaceItemInObject(parent, ctx->field, item);
++    }
++}
++
++
+ static bool jsonEnterField(Visitor *ctx, const char *name, I32 idx) {
+     ctx->field = name;
+ 
+     if (idx == 0) {
+-        ctx->nodes[++ctx->ptr] = cJSON_AddArrayToObject(ctx->nodes[ctx->ptr], name);
++        /* close the previous sibling list, if this list directly follows one */
++        if (cJSON_IsArray(ctx->nodes[ctx->ptr])) ctx->ptr--;
++
++        cJSON *array = cJSON_AddArrayToObject(ctx->nodes[ctx->ptr], name); /* no ++ptr in the same expression */
++        ctx->nodes[++ctx->ptr] = array;
+     } else if (idx < 0) {
+         if (cJSON_IsArray(ctx->nodes[ctx->ptr])) ctx->ptr--;
+     }
+@@ -49,43 +73,80 @@ static void jsonExitField(Visitor *ctx, const char *name, I32 idx) {
+     ctx->ptr--;
+ }
+ 
++typedef struct {
++    const char *name;
++    U32 id;
++} ClassName;
++
++static ClassName classNames[1024];
++static size_t classNameCount = 0;
++static bool addClassNames = false;
++
++static int compareClassName(const void *a, const void *b) {
++    return strcmp(((const ClassName *)a)->name, ((const ClassName *)b)->name);
++}
++
++static void buildClassNames(void) {
++    for (U32 id = 1; id < 1024; id++) {
++        const char *name = getClassName(id);
++        if (strcmp(name, "???") == 0) continue;
++
++        classNames[classNameCount].name = name;
++        classNames[classNameCount].id = id;
++        classNameCount++;
++    }
++
++    qsort(classNames, classNameCount, sizeof(ClassName), compareClassName);
++}
++
+ static bool jsonEnterType(Visitor *ctx, const char *name) {
+     // Skip metadata
+     if (strncmp(name, "Metadata", 8) == 0) return false;
+ 
++    // --types: tag every class object with its name and type id
++    if (addClassNames && cJSON_IsObject(ctx->nodes[ctx->ptr])) {
++        ClassName key = { name, 0 };
++        ClassName *found = bsearch(&key, classNames, classNameCount, sizeof(ClassName), compareClassName);
++
++        if (found != NULL && !cJSON_HasObjectItem(ctx->nodes[ctx->ptr], "__class")) {
++            cJSON_AddStringToObject(ctx->nodes[ctx->ptr], "__class", found->name);
++            cJSON_AddNumberToObject(ctx->nodes[ctx->ptr], "__id", found->id);
++        }
++    }
++
+     return true;
+ }
+ 
+ static void jsonVisitBOOL(Visitor *ctx, BOOL *self) {
+-    cJSON_ReplaceItemInObject(ctx->nodes[ctx->ptr - 1], ctx->field, cJSON_CreateBool(*self));
++    jsonSetValue(ctx, cJSON_CreateBool(*self));
+ }
+ 
+ static void jsonVisitF32(Visitor *ctx, F32 *self) {
+-    cJSON_ReplaceItemInObject(ctx->nodes[ctx->ptr - 1], ctx->field, cJSON_CreateNumber(*self));
++    jsonSetValue(ctx, cJSON_CreateNumber(*self));
+ }
+ 
+ static void jsonVisitI8(Visitor *ctx, I8 *self) {
+-    cJSON_ReplaceItemInObject(ctx->nodes[ctx->ptr - 1], ctx->field, cJSON_CreateNumber(*self));
++    jsonSetValue(ctx, cJSON_CreateNumber(*self));
+ }
+ 
+ static void jsonVisitI16(Visitor *ctx, I16 *self) {
+-    cJSON_ReplaceItemInObject(ctx->nodes[ctx->ptr - 1], ctx->field, cJSON_CreateNumber(*self));
++    jsonSetValue(ctx, cJSON_CreateNumber(*self));
+ }
+ 
+ static void jsonVisitI32(Visitor *ctx, I32 *self) {
+-    cJSON_ReplaceItemInObject(ctx->nodes[ctx->ptr - 1], ctx->field, cJSON_CreateNumber(*self));
++    jsonSetValue(ctx, cJSON_CreateNumber(*self));
+ }
+ 
+ static void jsonVisitU8(Visitor *ctx, U8 *self) {
+-    cJSON_ReplaceItemInObject(ctx->nodes[ctx->ptr - 1], ctx->field, cJSON_CreateNumber(*self));
++    jsonSetValue(ctx, cJSON_CreateNumber(*self));
+ }
+ 
+ static void jsonVisitU16(Visitor *ctx, U16 *self) {
+-    cJSON_ReplaceItemInObject(ctx->nodes[ctx->ptr - 1], ctx->field, cJSON_CreateNumber(*self));
++    jsonSetValue(ctx, cJSON_CreateNumber(*self));
+ }
+ 
+ static void jsonVisitU32(Visitor *ctx, U32 *self) {
+-    cJSON_ReplaceItemInObject(ctx->nodes[ctx->ptr - 1], ctx->field, cJSON_CreateNumber(*self));
++    jsonSetValue(ctx, cJSON_CreateNumber(*self));
+ }
+ 
+ static bool jsonEnterID(Visitor *ctx, ID *self) {
+@@ -93,7 +154,7 @@ static bool jsonEnterID(Visitor *ctx, ID *self) {
+ 
+     snprintf(buffer, sizeof(buffer), "%08X%08X", self->low, self->high);
+ 
+-    cJSON_ReplaceItemInObject(ctx->nodes[ctx->ptr - 1], ctx->field, cJSON_CreateString(buffer));
++    jsonSetValue(ctx, cJSON_CreateString(buffer));
+ 
+     return false;
+ }
+@@ -103,7 +164,7 @@ static bool jsonEnterLabelID(Visitor *ctx, LabelID *self) {
+ 
+     snprintf(buffer, sizeof(buffer), "%04X%04X", self->index, self->unique);
+ 
+-    cJSON_ReplaceItemInObject(ctx->nodes[ctx->ptr - 1], ctx->field, cJSON_CreateString(buffer));
++    jsonSetValue(ctx, cJSON_CreateString(buffer));
+ 
+     return false;
+ }
+@@ -113,7 +174,7 @@ static bool jsonEnterStringID(Visitor *ctx, StringID *self) {
+ 
+     snprintf(buffer, sizeof(buffer), "%04X%04X", self->index, self->unique);
+ 
+-    cJSON_ReplaceItemInObject(ctx->nodes[ctx->ptr - 1], ctx->field, cJSON_CreateString(buffer));
++    jsonSetValue(ctx, cJSON_CreateString(buffer));
+ 
+     return false;
+ }
+@@ -124,7 +185,7 @@ static bool jsonEnterStringBuffer(Visitor *ctx, StringBuffer *self) {
+     if (self->size == 0) next = cJSON_CreateNull(); 
+     else next = cJSON_CreateString(self->data);
+ 
+-    cJSON_ReplaceItemInObject(ctx->nodes[ctx->ptr - 1], ctx->field, next);
++    jsonSetValue(ctx, next);
+ 
+     return false;
+ }
+@@ -176,6 +237,47 @@ VisitorContext VISITOR_CONTEXT = {
+     .enterLocalizationFile = (void *)jsonEnterLocalizationFile,
+ };
+ 
++/* --stats: count chunks per (name, version) */
++typedef struct {
++    const char *name;
++    U32 version;
++    U32 count;
++} ChunkStat;
++
++static ChunkStat chunkStats[4096];
++static size_t chunkStatCount = 0;
++static void (*stdEnterChunk)(DecoderContext *ctx, const char *name, U32 end, U32 version) = NULL;
++
++static void statsEnterChunk(DecoderContext *ctx, const char *name, U32 end, U32 version) {
++    size_t i;
++    for (i = 0; i < chunkStatCount; i++) {
++        if (chunkStats[i].version == version && strcmp(chunkStats[i].name, name) == 0) break;
++    }
++
++    if (i == chunkStatCount && chunkStatCount < 4096) {
++        chunkStats[chunkStatCount++] = (ChunkStat) { name, version, 0 };
++    }
++
++    if (i < chunkStatCount) chunkStats[i].count++;
++
++    stdEnterChunk(ctx, name, end, version);
++}
++
++static StdDecoder *crashDecoder = NULL;
++static Visitor *crashVisitor = NULL;
++
++static void onCrash(int sig) {
++    fprintf(stderr, "CRASH: signal %d while %s\n", sig, crashDecoder != NULL ? "decoding" : "writing JSON");
++    if (crashDecoder != NULL) stdDecoderTrace(crashDecoder);
++    if (crashDecoder == NULL && crashVisitor != NULL) fprintf(stderr, "  JSON depth %u, field %s\n", crashVisitor->ptr, crashVisitor->field);
++#ifdef __GLIBC__
++    void *frames[64];
++    int n = backtrace(frames, 64);
++    backtrace_symbols_fd(frames, n, 2);
++#endif
++    _exit(3);
++}
++
+ int main(int argc, char **argv) {
+     int result = 0;
+ 
+@@ -187,8 +289,24 @@ int main(int argc, char **argv) {
+     Arena arena = { 0 };
+     AssetPool pool = { 0 };
+ 
++    bool strict = false;
++    bool stats = false;
++
++    while (argc > 1 && strncmp(argv[1], "--", 2) == 0) {
++        if (strcmp(argv[1], "--strict") == 0) strict = true;
++        else if (strcmp(argv[1], "--ps2") == 0) setenv("VICIOUS_PLATFORM", "ps2", 1);
++        else if (strcmp(argv[1], "--types") == 0) addClassNames = true;
++        else if (strcmp(argv[1], "--stats") == 0) stats = true;
++        else goto usage;
++
++        argv++;
++        argc--;
++    }
++
+     if (argc < 2) goto usage;
+ 
++    if (addClassNames) buildClassNames();
++
+     const char *filePath = argv[1];
+ 
+     const char *ext = strrchr(filePath, '.');
+@@ -219,16 +337,57 @@ int main(int argc, char **argv) {
+         .ptr = 0,
+     };
+ 
+-    if (isLoc) {
+-        LocalizationFile locFile;
+-        decodeLocalizationFile((DecoderContext *)&decoder, &locFile);
+-        visitLocalizationFile((VisitorContext *)&visitor, &locFile);
+-    } else {
+-        AssetFile assetFile;
+-        decodeAssetFile((DecoderContext *)&decoder, &assetFile);
+-        visitAssetFile((VisitorContext *)&visitor, &assetFile);
++    if (stats) {
++        stdEnterChunk = decoder.ctx.enterChunk;
++        decoder.ctx.enterChunk = statsEnterChunk;
++    }
++
++    jmp_buf bail;
++    if (strict) {
++        stdDecoderStrict(&decoder, &bail);
++        crashDecoder = &decoder;
++        signal(SIGSEGV, onCrash);
++        signal(SIGBUS, onCrash);
++    }
++
++    LocalizationFile locFile;
++    AssetFile assetFile;
++
++    if (setjmp(bail) != 0) {
++        fprintf(stderr, "FAIL %s: decode stopped at the first error\n", filePath);
++        result = 2;
++        goto cleanup;
+     }
+ 
++    if (isLoc) decodeLocalizationFile((DecoderContext *)&decoder, &locFile);
++    else decodeAssetFile((DecoderContext *)&decoder, &assetFile);
++
++    crashDecoder = NULL; /* past decoding: a crash now is in the JSON visitor */
++    crashVisitor = &visitor;
++
++    if (strict) {
++        long at = ftell(inFile);
++        fseek(inFile, 0, SEEK_END);
++        long size = ftell(inFile);
++
++        if (at != size || decoder.errors != 0) {
++            fprintf(stderr, "FAIL %s: %u errors, stopped at 0x%lx of 0x%lx\n", filePath, decoder.errors, at, size);
++            result = 2;
++            goto cleanup;
++        }
++
++        fprintf(stderr, "OK %s: %u chunks\n", filePath, decoder.chunks);
++    }
++
++    if (stats) {
++        for (size_t i = 0; i < chunkStatCount; i++) {
++            printf("CHUNK\t%s\t%u\t%u\n", chunkStats[i].name, chunkStats[i].version, chunkStats[i].count);
++        }
++    }
++
++    if (isLoc) visitLocalizationFile((VisitorContext *)&visitor, &locFile);
++    else visitAssetFile((VisitorContext *)&visitor, &assetFile);
++
+     char *str = cJSON_PrintUnformatted(root);
+     if (str == NULL) goto error;
+ 
+@@ -239,7 +398,11 @@ int main(int argc, char **argv) {
+     goto cleanup;
+ 
+ usage:
+-    printf("usage: %s file [out_json]\n", argv[0]);
++    printf("usage: %s [--strict] [--ps2] [--types] [--stats] file [out_json]\n", argv[0]);
++    printf("  --strict  stop at the first error; every chunk must end exactly at its end offset\n");
++    printf("  --ps2     decode PS2 data (same as VICIOUS_PLATFORM=ps2)\n");
++    printf("  --stats   print CHUNK<tab>name<tab>version<tab>count lines to stdout\n");
++    printf("  --types   add \"__class\" and \"__id\" to every class object in the JSON\n");
+ 
+ error:
+     result = 1;
+-- 
+2.54.0
+

@@ -3,6 +3,7 @@
 Clean-room notes from studying our own disc dump. Little-endian throughout.
 Status legend: ✅ verified on real data · 🟡 partial · ❓ unknown
 Class ids, PS2 loader per class and versions on the disc: [class-map.md](class-map.md) (+ `class-map.csv`).
+Full class schema: vicious + our PS2 patches, see [vicious-ps2.md](vicious-ps2.md)
 
 ## Disc layout ✅
 

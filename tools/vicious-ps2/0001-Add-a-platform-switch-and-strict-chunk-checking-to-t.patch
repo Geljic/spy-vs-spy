@@ -1,0 +1,379 @@
+From bb7a093bad551e5ed37de5b34fe0fd562d7d3044 Mon Sep 17 00:00:00 2001
+From: Simon Geljic <5978447+Geljic@users.noreply.github.com>
+Date: Mon, 12 Oct 2026 20:15:40 +1100
+Subject: [PATCH 1/6] Add a platform switch and strict chunk checking to the
+ decoder
+
+ctx.platform() in the schema DSL emits viciousPlatform (0 = Xbox, 1 = PS2),
+set from VICIOUS_PLATFORM by stdDecoder(). The decoder calls optional
+enterChunk/exitChunk hooks; StdDecoder uses them for a chunk stack and,
+with stdDecoderStrict(), checks every chunk ends exactly at its end offset.
+A full arena falls back to the heap instead of returning NULL.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ packages/c/codegen/decoder.ts        | 18 ++++++
+ packages/c/codegen/emit.ts           |  4 ++
+ packages/c/codegen/main.ts           |  1 +
+ packages/c/include/vicious/context.h | 31 ++++++++++
+ packages/c/src/context.c             | 92 +++++++++++++++++++++++++++-
+ packages/core/src/backend/core.ts    |  7 +++
+ packages/core/src/backend/emit.ts    |  8 +++
+ packages/core/src/schema/core.ts     |  2 +
+ packages/js/codegen/emit.ts          |  4 ++
+ packages/js/codegen/main.ts          |  7 +++
+ 10 files changed, 172 insertions(+), 2 deletions(-)
+
+diff --git a/packages/c/codegen/decoder.ts b/packages/c/codegen/decoder.ts
+index 182e8ec..9698f95 100644
+--- a/packages/c/codegen/decoder.ts
++++ b/packages/c/codegen/decoder.ts
+@@ -45,6 +45,10 @@ function buildContext(): string {
+ 
+       void *(*allocate)(struct DecoderContext *ctx, U32 size, U32 count);
+       void (*read)(struct DecoderContext *ctx, void *ptr, U32 size, U32 count);
++
++      /* Optional chunk hooks (NULL = off): called after a chunk header is read and before its footer */
++      void (*enterChunk)(struct DecoderContext *ctx, const char *name, U32 end, U32 version);
++      void (*exitChunk)(struct DecoderContext *ctx, const char *name, U32 end);
+     } DecoderContext;
+   `;
+ }
+@@ -123,6 +127,18 @@ class DefinitionDecoderDeclaration extends EmptyEmit {
+ }
+ 
+ class DefinitionDecoderImplementation extends CEmit {
++  private chunkName: string = "";
++
++  protected visitClass(cls: Class): void {
++    this.chunkName = cls.constructor.name;
++    super.visitClass(cls);
++  }
++
++  protected visitStruct(struct: Struct): void {
++    this.chunkName = struct.constructor.name;
++    super.visitStruct(struct);
++  }
++
+   protected emitObject(obj: any, handler: string): string {
+     const typeName = obj.constructor.name;
+ 
+@@ -157,11 +173,13 @@ class DefinitionDecoderImplementation extends CEmit {
+       decodeMetadataHeader(ctx, &self->metadata.header);
+       U32 __version = self->metadata.header.version;
+       U32 __end = self->metadata.header.end;
++      if (ctx->enterChunk) ctx->enterChunk(ctx, "${this.chunkName}", __end, __version);
+     `;
+   }
+ 
+   protected emitMetadataFooter(): string {
+     return cg`
++      if (ctx->exitChunk) ctx->exitChunk(ctx, "${this.chunkName}", __end);
+       decodeMetadataFooter(ctx, &self->metadata.footer);
+     `;
+   }
+diff --git a/packages/c/codegen/emit.ts b/packages/c/codegen/emit.ts
+index 9f1653c..79788af 100644
+--- a/packages/c/codegen/emit.ts
++++ b/packages/c/codegen/emit.ts
+@@ -128,6 +128,10 @@ export abstract class CEmit extends Emit {
+     return cg`__end`;
+   }
+ 
++  protected emitPlatform(): string {
++    return cg`viciousPlatform`;
++  }
++
+   protected emitIndex(target: string, index: string): string {
+     return cg`${target}[${index}]`;
+   }
+diff --git a/packages/c/codegen/main.ts b/packages/c/codegen/main.ts
+index 34e1ffc..012c734 100644
+--- a/packages/c/codegen/main.ts
++++ b/packages/c/codegen/main.ts
+@@ -22,6 +22,7 @@ async function main() {
+       [
+         "#ifndef VICIOUS_GENERATED\n#define VICIOUS_GENERATED",
+         buildTypes(),
++        "/* Target platform of the data being read: 0 = Xbox (default), 1 = PS2 */\nextern U32 viciousPlatform;",
+         buildEnum(),
+         buildDecoderDeclaration(),
+         buildEncoderDeclaration(),
+diff --git a/packages/c/include/vicious/context.h b/packages/c/include/vicious/context.h
+index 77ddf92..043c4e0 100644
+--- a/packages/c/include/vicious/context.h
++++ b/packages/c/include/vicious/context.h
+@@ -1,17 +1,30 @@
+ #ifndef VICIOUS_CONTEXT
+ #define VICIOUS_CONTEXT
+ 
++#include <setjmp.h>
+ #include <stdio.h>
+ 
+ #include "./generated.h"
+ #include "./memory.h"
+ 
++#define STD_DECODER_MAX_DEPTH 512
++
+ typedef struct {
+     DecoderContext ctx;
+ 
+     FILE *file;
+     Arena *arena;
+     AssetPool *pool;
++
++    /* Chunk checking (see stdDecoderStrict) */
++    bool strict;
++    jmp_buf *bail;
++    U32 errors;
++    U32 chunks;
++    I32 depth;
++    const char *names[STD_DECODER_MAX_DEPTH];
++    U32 starts[STD_DECODER_MAX_DEPTH];
++    U32 ends[STD_DECODER_MAX_DEPTH];
+ } StdDecoder;
+ 
+ typedef struct {
+@@ -28,6 +41,24 @@ typedef struct {
+  */
+ void stdDecoder(StdDecoder *ctx, FILE *file, AssetPool *pool, Arena *arena);
+ 
++/**
++ * Enable strict chunk checking: every chunk must end exactly at its end offset
++ * (after 4-byte alignment). On the first error the chunk stack is printed and, when
++ * `bail` is set, the decoder longjmp()s to it with value 1.
++ */
++void stdDecoderStrict(StdDecoder *ctx, jmp_buf *bail);
++
++/**
++ * Print the current file offset and chunk stack to stderr (for crash handlers)
++ */
++void stdDecoderTrace(StdDecoder *ctx);
++
++/**
++ * Set viciousPlatform from the VICIOUS_PLATFORM environment variable
++ * ("ps2" or "1" = PS2, anything else = Xbox). Called by stdDecoder().
++ */
++void viciousPlatformFromEnv(void);
++
+ /**
+  * Create a libc EncoderContext
+  */
+diff --git a/packages/c/src/context.c b/packages/c/src/context.c
+index 0b95cc2..48e47ae 100644
+--- a/packages/c/src/context.c
++++ b/packages/c/src/context.c
+@@ -1,7 +1,76 @@
+ #include <vicious/context.h>
+ 
++#include <stdlib.h>
++#include <string.h>
++
++U32 viciousPlatform = 0;
++
++void viciousPlatformFromEnv(void) {
++    const char *env = getenv("VICIOUS_PLATFORM");
++
++    if (env == NULL) return;
++
++    viciousPlatform = (strcmp(env, "ps2") == 0 || strcmp(env, "PS2") == 0 || strcmp(env, "1") == 0) ? 1 : 0;
++}
++
++void stdDecoderTrace(StdDecoder *self) {
++    fprintf(stderr, "  at offset 0x%lx, chunk stack (innermost last):\n", ftell(self->file));
++
++    for (I32 i = 0; i < self->depth && i < STD_DECODER_MAX_DEPTH; i++) {
++        fprintf(stderr, "    %*s%s [0x%x..0x%x]\n", i, "", self->names[i], self->starts[i], self->ends[i]);
++    }
++}
++
++static void stdDecoderFail(StdDecoder *self) {
++    self->errors++;
++
++    if (self->strict) {
++        stdDecoderTrace(self);
++
++        if (self->bail != NULL) longjmp(*self->bail, 1);
++    }
++}
++
+ static void stdDecoderLog(StdDecoder *self, const char *scope, const char *message) {
+     printf("%s: %s\n", scope, message);
++
++    if (strcmp(scope, "ERROR") == 0) {
++        if (self->strict) fprintf(stderr, "ERROR: %s\n", message);
++        stdDecoderFail(self);
++    }
++}
++
++static void stdDecoderEnterChunk(StdDecoder *self, const char *name, U32 end, U32 version) {
++    U32 start = (U32)ftell(self->file) - 12;
++
++    if (self->depth >= 0 && self->depth < STD_DECODER_MAX_DEPTH) {
++        self->names[self->depth] = name;
++        self->starts[self->depth] = start;
++        self->ends[self->depth] = end;
++    }
++
++    self->depth++;
++    self->chunks++;
++
++    if (self->strict && (end < start + 12 || (self->depth > 1 && self->depth <= STD_DECODER_MAX_DEPTH && end > self->ends[self->depth - 2]))) {
++        fprintf(stderr, "ERROR: %s v%u: bad end offset 0x%x\n", name, version, end);
++        stdDecoderFail(self);
++    }
++}
++
++static void stdDecoderExitChunk(StdDecoder *self, const char *name, U32 end) {
++    if (self->strict) {
++        U32 at = (U32)ftell(self->file);
++        U32 aligned = (at + 3) & ~3u;
++
++        if (aligned != end) {
++            fprintf(stderr, "ERROR: %s chunk ends at 0x%x but data stops at 0x%x (%s by %d bytes)\n", name, end, at,
++                at > end ? "over-read" : "under-read", at > end ? (int)(at - end) : (int)(end - at));
++            stdDecoderFail(self);
++        }
++    }
++
++    self->depth--;
+ }
+ 
+ static U32 stdDecoderTell(StdDecoder *self) {
+@@ -22,7 +91,12 @@ static void stdDecoderSetId(StdDecoder *self, ID id, U32 typeId, void *asset) {
+ 
+ static void * stdDecoderAllocate(StdDecoder *self, U32 size, U32 count) {
+     if (self->arena != NULL) {
+-        return arenaAllocate(self->arena, (size_t)size * (size_t)count);
++        void *ptr = arenaAllocate(self->arena, (size_t)size * (size_t)count);
++
++        /* Arena full (big PS2 maps): fall back to the heap instead of returning NULL */
++        if (ptr == NULL && (size_t)size * (size_t)count > 0) ptr = calloc(count, size);
++
++        return ptr;
+     } else {
+         return malloc((size_t)size * (size_t) count);
+     }
+@@ -39,7 +113,9 @@ static DecoderContext STD_DECODER = {
+     .getId = (void *)stdDecoderGetId,
+     .setId = (void *)stdDecoderSetId,
+     .allocate = (void *)stdDecoderAllocate,
+-    .read = (void *)stdDecoderRead
++    .read = (void *)stdDecoderRead,
++    .enterChunk = (void *)stdDecoderEnterChunk,
++    .exitChunk = (void *)stdDecoderExitChunk
+ };
+ 
+ void stdDecoder(StdDecoder *self, FILE *file, AssetPool *pool, Arena *arena) {
+@@ -47,6 +123,18 @@ void stdDecoder(StdDecoder *self, FILE *file, AssetPool *pool, Arena *arena) {
+     self->file = file;
+     self->arena = arena;
+     self->pool = pool;
++    self->strict = false;
++    self->bail = NULL;
++    self->errors = 0;
++    self->chunks = 0;
++    self->depth = 0;
++
++    viciousPlatformFromEnv();
++}
++
++void stdDecoderStrict(StdDecoder *self, jmp_buf *bail) {
++    self->strict = true;
++    self->bail = bail;
+ }
+ 
+ static void stdEncoderLog(StdEncoder *self, const char *scope, const char *message) {
+diff --git a/packages/core/src/backend/core.ts b/packages/core/src/backend/core.ts
+index 32de7b4..c45f265 100644
+--- a/packages/core/src/backend/core.ts
++++ b/packages/core/src/backend/core.ts
+@@ -540,6 +540,12 @@ export abstract class Backend {
+     this.exitEnd();
+   }
+ 
++  protected visitPlatform(): void {
++    this.exitPlatform();
++  }
++
++  protected exitPlatform(): void {}
++
+   protected visitIndex(target: Value, index: Value): any {
+     return new IndexReference(target as any, index);
+   }
+@@ -690,6 +696,7 @@ export abstract class Backend {
+ 
+       version: () => this.visitVersion() as any,
+       end: () => this.visitEnd() as any,
++      platform: () => this.visitPlatform() as any,
+ 
+       index: (target, value) => this.visitIndex(target as any, value) as any,
+ 
+diff --git a/packages/core/src/backend/emit.ts b/packages/core/src/backend/emit.ts
+index 19a042f..32b15a0 100644
+--- a/packages/core/src/backend/emit.ts
++++ b/packages/core/src/backend/emit.ts
+@@ -388,6 +388,14 @@ export abstract class Emit extends Backend {
+     this.pushString(this.emitEnd());
+   }
+ 
++  protected exitPlatform(): void {
++    this.pushString(this.emitPlatform());
++  }
++
++  protected emitPlatform(): string {
++    return "0";
++  }
++
+   protected enterIndex(_target: Value, _index: Value): void {
+     this.pushScope();
+   }
+diff --git a/packages/core/src/schema/core.ts b/packages/core/src/schema/core.ts
+index 4f80d2c..11e2388 100644
+--- a/packages/core/src/schema/core.ts
++++ b/packages/core/src/schema/core.ts
+@@ -89,6 +89,8 @@ export type CodeContext = {
+ 
+   version: () => number;
+   end: () => number;
++  /** Target platform of the data being read: 0 = Xbox (default), 1 = PS2 */
++  platform: () => number;
+ 
+   index: <T extends Definition | number | string>(
+     target: T[],
+diff --git a/packages/js/codegen/emit.ts b/packages/js/codegen/emit.ts
+index 72b4a7f..9c1ee7f 100644
+--- a/packages/js/codegen/emit.ts
++++ b/packages/js/codegen/emit.ts
+@@ -128,6 +128,10 @@ export abstract class TSEmit extends Emit {
+     return cg`__end`;
+   }
+ 
++  protected emitPlatform(): string {
++    return cg`viciousPlatform`;
++  }
++
+   protected emitIndex(target: string, index: string): string {
+     return cg`${target}[${index}]!`;
+   }
+diff --git a/packages/js/codegen/main.ts b/packages/js/codegen/main.ts
+index 6c4758d..56ab1a7 100644
+--- a/packages/js/codegen/main.ts
++++ b/packages/js/codegen/main.ts
+@@ -9,6 +9,13 @@ import { buildVisitor } from "./visitor";
+ 
+ function main() {
+   const out = [
++    [
++      "/** Target platform of the data being read: 0 = Xbox (default), 1 = PS2 */",
++      "export let viciousPlatform = 0;",
++      "export function setViciousPlatform(platform: number): void {",
++      "  viciousPlatform = platform;",
++      "}",
++    ].join("\n"),
+     buildTypes(),
+     buildDecoder(),
+     buildEncoder(),
+-- 
+2.54.0
+

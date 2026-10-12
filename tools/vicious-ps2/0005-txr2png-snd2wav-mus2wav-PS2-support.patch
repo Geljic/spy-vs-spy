@@ -1,0 +1,311 @@
+From 7804fcdb30c685cf6db0d530ce971cb39c18d359 Mon Sep 17 00:00:00 2001
+From: Simon Geljic <5978447+Geljic@users.noreply.github.com>
+Date: Mon, 12 Oct 2026 20:15:40 +1100
+Subject: [PATCH 5/6] txr2png, snd2wav, mus2wav: PS2 support
+
+With VICIOUS_PLATFORM=ps2: txr2png unswizzles PSMT8 and reads the CSM1
+palette, snd2wav decodes mono PS-ADPCM, mus2wav reads headerless mono
+PS-ADPCM music (44100 Hz default).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ apps/audio/src/mus2wav.c   | 94 +++++++++++++++++++++++++++++++++++++-
+ apps/audio/src/snd2wav.c   | 79 ++++++++++++++++++++++++++++++++
+ apps/texture/src/txr2png.c | 49 ++++++++++++++++++++
+ 3 files changed, 221 insertions(+), 1 deletion(-)
+
+diff --git a/apps/audio/src/mus2wav.c b/apps/audio/src/mus2wav.c
+index 91cee13..43455dc 100644
+--- a/apps/audio/src/mus2wav.c
++++ b/apps/audio/src/mus2wav.c
+@@ -1,6 +1,7 @@
+ #include <stdint.h>
+ #include <stdio.h>
+ #include <stdlib.h>
++#include <string.h>
+ 
+ typedef struct __attribute__((packed)) {
+     char chunkID[4];
+@@ -37,6 +38,90 @@ typedef struct __attribute__((packed)) {
+     uint32_t dataSize;
+ } MUSHeader;
+ 
++typedef struct __attribute__((packed)) {
++    char chunkID[4];
++    uint32_t chunkSize;
++    char format[4];
++    char fmtID[4];
++    uint32_t fmtSize;
++    uint16_t formatTag;
++    uint16_t channels;
++    uint32_t sampleRate;
++    uint32_t byteRate;
++    uint16_t blockAlign;
++    uint16_t bitsPerSample;
++    char dataID[4];
++    uint32_t dataSize;
++} WAVPCMHeader;
++
++/*
++ * PS2 .mus: no header, the whole file is mono PS-ADPCM (16-byte blocks, flags byte 2 on every
++ * block). The rate is not in the file; 44100 Hz comes from the map Sound that streams it.
++ */
++static int ps2MusToWav(FILE *musFile, FILE *wavFile, uint32_t rate) {
++    static const int coef[5][2] = { { 0, 0 }, { 60, 0 }, { 115, -52 }, { 98, -55 }, { 122, -60 } };
++
++    fseek(musFile, 0, SEEK_END);
++    long size = ftell(musFile);
++    fseek(musFile, 0, SEEK_SET);
++
++    uint32_t blocks = (uint32_t)(size / 16);
++    uint8_t *in = malloc((size_t)blocks * 16);
++    int16_t *pcm = malloc((size_t)blocks * 28 * sizeof(int16_t) + 2);
++    if (in == NULL || pcm == NULL) { free(in); free(pcm); return 1; }
++
++    fread(in, 16, blocks, musFile);
++
++    uint32_t n = 0;
++    int h1 = 0, h2 = 0;
++
++    for (uint32_t b = 0; b < blocks; b++) {
++        const uint8_t *blk = in + b * 16;
++        int shift = blk[0] & 0xF;
++        int filter = blk[0] >> 4;
++        if (filter > 4) filter = 4;
++
++        for (int k = 2; k < 16; k++) {
++            for (int half = 0; half < 2; half++) {
++                int nib = half ? blk[k] >> 4 : blk[k] & 0xF;
++                int sample = (int16_t)(nib << 12) >> shift;
++
++                sample += (h1 * coef[filter][0] + h2 * coef[filter][1] + 32) >> 6;
++                if (sample > 32767) sample = 32767;
++                if (sample < -32768) sample = -32768;
++
++                h2 = h1;
++                h1 = sample;
++                pcm[n++] = (int16_t)sample;
++            }
++        }
++    }
++
++    WAVPCMHeader header = {
++        .chunkID = { 'R', 'I', 'F', 'F' },
++        .chunkSize = 36 + n * 2,
++        .format = { 'W', 'A', 'V', 'E' },
++        .fmtID = { 'f', 'm', 't', ' ' },
++        .fmtSize = 16,
++        .formatTag = 1,
++        .channels = 1,
++        .sampleRate = rate,
++        .byteRate = rate * 2,
++        .blockAlign = 2,
++        .bitsPerSample = 16,
++        .dataID = { 'd', 'a', 't', 'a' },
++        .dataSize = n * 2
++    };
++
++    fwrite(&header, sizeof(header), 1, wavFile);
++    fwrite(pcm, sizeof(int16_t), n, wavFile);
++
++    free(in);
++    free(pcm);
++
++    return 0;
++}
++
+ int main(int argc, const char **argv) {
+     int result = 0;
+ 
+@@ -55,6 +140,13 @@ int main(int argc, const char **argv) {
+     wavFile = fopen(wavPath, "wb");
+     if (wavFile == NULL) goto error;
+ 
++    const char *platform = getenv("VICIOUS_PLATFORM");
++    if (platform != NULL && (strcmp(platform, "ps2") == 0 || strcmp(platform, "PS2") == 0 || strcmp(platform, "1") == 0)) {
++        uint32_t rate = argc > 3 ? (uint32_t)atoi(argv[3]) : 44100;
++        result = ps2MusToWav(musFile, wavFile, rate);
++        goto cleanup;
++    }
++
+     MUSHeader musHeader;
+     fread(&musHeader, sizeof(musHeader), 1, musFile);
+ 
+@@ -95,7 +187,7 @@ int main(int argc, const char **argv) {
+     goto cleanup;
+ 
+ usage:
+-    printf("usage: %s mus_file [wav_file]\n", argv[0]);
++    printf("usage: %s mus_file [wav_file] [ps2_rate]\n  VICIOUS_PLATFORM=ps2: headerless mono PS-ADPCM, default 44100 Hz\n", argv[0]);
+ 
+ error:
+     result = 1;
+diff --git a/apps/audio/src/snd2wav.c b/apps/audio/src/snd2wav.c
+index 603775f..1ac0605 100644
+--- a/apps/audio/src/snd2wav.c
++++ b/apps/audio/src/snd2wav.c
+@@ -1,4 +1,5 @@
+ #include <vicious.h>
++#include <stdlib.h>
+ 
+ #define ARENA_SIZE 32 * 1024 * 1024
+ #define POOL_SIZE 8192
+@@ -27,9 +28,87 @@ typedef struct __attribute__((packed)) {
+     uint32_t dataSize;
+ } WAVIMAHeader;
+ 
++typedef struct __attribute__((packed)) {
++    char chunkID[4];
++    uint32_t chunkSize;
++    char format[4];
++    char fmtID[4];
++    uint32_t fmtSize;
++    uint16_t formatTag;
++    uint16_t channels;
++    uint32_t sampleRate;
++    uint32_t byteRate;
++    uint16_t blockAlign;
++    uint16_t bitsPerSample;
++    char dataID[4];
++    uint32_t dataSize;
++} WAVPCMHeader;
++
++/* PS2: mono PS-ADPCM (16-byte blocks: shift/filter byte, flags byte, 14 bytes of 4-bit samples) -> 16-bit PCM */
++static bool writePS2Sound(FILE *file, const Sound *self) {
++    static const int coef[5][2] = { { 0, 0 }, { 60, 0 }, { 115, -52 }, { 98, -55 }, { 122, -60 } };
++
++    uint32_t blocks = self->buffer.data.size / 16;
++    const uint8_t *in = self->buffer.data.data;
++    int16_t *pcm = malloc((size_t)blocks * 28 * sizeof(int16_t) + 2);
++    if (pcm == NULL) return false;
++
++    uint32_t n = 0;
++    int h1 = 0, h2 = 0;
++
++    for (uint32_t b = 0; b < blocks; b++) {
++        const uint8_t *blk = in + b * 16;
++        int shift = blk[0] & 0xF;
++        int filter = blk[0] >> 4;
++        if (filter > 4) filter = 4;
++
++        for (int k = 2; k < 16; k++) {
++            for (int half = 0; half < 2; half++) {
++                int nib = half ? blk[k] >> 4 : blk[k] & 0xF;
++                int sample = (int16_t)(nib << 12) >> shift;
++
++                sample += (h1 * coef[filter][0] + h2 * coef[filter][1] + 32) >> 6;
++                if (sample > 32767) sample = 32767;
++                if (sample < -32768) sample = -32768;
++
++                h2 = h1;
++                h1 = sample;
++                pcm[n++] = (int16_t)sample;
++            }
++        }
++
++        if (blk[1] & 1) break; /* end flag */
++    }
++
++    uint32_t rate = self->buffer.sampleRate ? self->buffer.sampleRate : self->samplingRate;
++    WAVPCMHeader header = {
++        .chunkID = { 'R', 'I', 'F', 'F' },
++        .chunkSize = 36 + n * 2,
++        .format = { 'W', 'A', 'V', 'E' },
++        .fmtID = { 'f', 'm', 't', ' ' },
++        .fmtSize = 16,
++        .formatTag = 1,
++        .channels = 1,
++        .sampleRate = rate,
++        .byteRate = rate * 2,
++        .blockAlign = 2,
++        .bitsPerSample = 16,
++        .dataID = { 'd', 'a', 't', 'a' },
++        .dataSize = n * 2
++    };
++
++    fwrite(&header, sizeof(header), 1, file);
++    fwrite(pcm, sizeof(int16_t), n, file);
++    free(pcm);
++
++    return true;
++}
++
+ bool writeSound(FILE *file, const Sound *self) {
+     if (self->disabled) return true;
+ 
++    if (viciousPlatform == 1) return writePS2Sound(file, self);
++
+     const WAVFmtChunk *fmtChunk = &self->buffer.fmtChunk;
+ 
+     uint32_t dataSize = self->buffer.data.size;
+diff --git a/apps/texture/src/txr2png.c b/apps/texture/src/txr2png.c
+index ee48d11..dc21b0d 100644
+--- a/apps/texture/src/txr2png.c
++++ b/apps/texture/src/txr2png.c
+@@ -1,6 +1,7 @@
+ #include <vicious.h>
+ 
+ #include <stdio.h>
++#include <string.h>
+ 
+ #define STB_IMAGE_WRITE_IMPLEMENTATION
+ #include "stb_image_write.h"
+@@ -168,7 +169,55 @@ uint8_t dxtAlpha(uint32_t x, uint32_t y, dxt_alpha_t a) {
+     }
+ }
+ 
++/* PS2: GS PSMT8 block swizzle (pixels stored as if PSMT32) */
++static void unswizzlePSMT8(uint8_t *out, const uint8_t *in, uint32_t w, uint32_t h) {
++    for (uint32_t y = 0; y < h; y++) {
++        for (uint32_t x = 0; x < w; x++) {
++            uint32_t block = (y & ~0xFu) * w + (x & ~0xFu) * 2;
++            uint32_t swap = (((y + 2) >> 2) & 1) * 4;
++            uint32_t py = (((y & ~3u) >> 1) + (y & 1)) & 7;
++            uint32_t col = py * w * 2 + ((x + swap) & 7) * 4;
++            uint32_t byte = ((y >> 1) & 1) + ((x >> 2) & 2);
++
++            out[y * w + x] = in[block + col + byte];
++        }
++    }
++}
++
++/* PS2: 8-bit indexed pixels (base level first) + 256 x RGBA palette in CSM1 order, alpha 0..0x80 */
++static bool writePS2ImageTexture(const char *filename, const ImageTexture *self) {
++    uint32_t w = self->buffer.width, h = self->buffer.height;
++    const uint8_t *pixels = self->buffer.pixels.data;
++    const uint8_t *palette = self->buffer.palette.data;
++
++    if (pixels == NULL || palette == NULL) return false;
++
++    rgba_t *rgba = malloc(sizeof(rgba_t) * w * h);
++    uint8_t *index = malloc(w * h);
++    if (rgba == NULL || index == NULL) { free(rgba); free(index); return false; }
++
++    if (w >= 16 && h >= 4) unswizzlePSMT8(index, pixels, w, h);
++    else memcpy(index, pixels, w * h);
++
++    for (uint32_t i = 0; i < w * h; i++) {
++        uint8_t c = index[i];
++        uint8_t j = (c & 0xE7) | ((c & 0x08) << 1) | ((c & 0x10) >> 1); /* CSM1: swap bits 3 and 4 */
++        const uint8_t *p = palette + 4 * j;
++
++        rgba[i] = (rgba_t) { .r = p[0], .g = p[1], .b = p[2], .a = p[3] >= 0x80 ? 0xFF : p[3] * 2 };
++    }
++
++    bool status = stbi_write_png(filename, w, h, 4, rgba, w * sizeof(rgba_t));
++
++    free(index);
++    free(rgba);
++
++    return status;
++}
++
+ bool writeImageTexture(const char *filename, const ImageTexture *self) {
++    if (viciousPlatform == 1) return writePS2ImageTexture(filename, self);
++
+     rgba_t *rgba = malloc(sizeof(rgba_t) * self->buffer.width * self->buffer.height);
+     if (rgba == NULL) return false;
+ 
+-- 
+2.54.0
+

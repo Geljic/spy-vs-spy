@@ -1,0 +1,80 @@
+From ae7996522a6f99b3aae38a1e8bb7067c5ab32324 Mon Sep 17 00:00:00 2001
+From: Simon Geljic <5978447+Geljic@users.noreply.github.com>
+Date: Mon, 12 Oct 2026 20:15:40 +1100
+Subject: [PATCH 4/6] Schema: decode the collision tree (V20_11) on PS2
+
+Fixes two bit-field bugs in V20_15/V20_11_1 (low-27-bit merge dropped the
+normal count; the 4-bit field stores count - 1). Only used for PS2, where
+all 1057 collision chunks now decode to their exact end.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ packages/core/src/schema/types/staticMesh.ts | 33 +++++++++++++++-----
+ 1 file changed, 26 insertions(+), 7 deletions(-)
+
+diff --git a/packages/core/src/schema/types/staticMesh.ts b/packages/core/src/schema/types/staticMesh.ts
+index e825190..69c8536 100644
+--- a/packages/core/src/schema/types/staticMesh.ts
++++ b/packages/core/src/schema/types/staticMesh.ts
+@@ -231,11 +231,27 @@ export class V20_9 extends Struct {
+   //     ctx.walk();
+   //   },
+   // });
+-  f_2 = field(U8Buffer, {
++  /** PS2: the collision tree decoded with V20_11 (Xbox keeps the raw bytes in f_2) */
++  ps2Tree = field(V20_11, {
+     condition: (ctx) =>
+       ctx.and(
+         (ctx) => ctx.isTrue(this.enabled),
+-        (ctx) => ctx.gt((ctx) => ctx.end(), 0)
++        (ctx) => ctx.eq((ctx) => ctx.platform(), 1)
++      ),
++    custom: (ctx) => {
++      ctx.set(this.ps2Tree.version, (ctx) => ctx.version());
++      ctx.walk();
++    },
++  });
++  f_2 = field(U8Buffer, {
++    condition: (ctx) =>
++      ctx.and(
++        (ctx) =>
++          ctx.and(
++            (ctx) => ctx.isTrue(this.enabled),
++            (ctx) => ctx.gt((ctx) => ctx.end(), 0)
++          ),
++        (ctx) => ctx.neq((ctx) => ctx.platform(), 1)
+       ),
+     custom: (ctx) => {
+       ctx.set(this.f_2.consume, false);
+@@ -337,8 +353,9 @@ export class V20_11_1 extends Struct {
+   _ = deprecated((ctx) => ctx.eq(this.version, 1));
+   list2 = field((ctx) => ctx.list(V20_11_3), {
+     custom: (ctx) => {
++      // The 4-bit field stores (normal count - 1); verified on PS2 data (V20_11 is only used for PS2)
+       const size = ctx.var(U32, (ctx) =>
+-        ctx.band((ctx) => ctx.shr(this.count2, 27), 0b1111)
++        ctx.add((ctx) => ctx.band((ctx) => ctx.shr(this.count2, 27), 0b1111), 1)
+       );
+       ctx.allocate(this.list2, size);
+ 
+@@ -527,11 +544,13 @@ export class V20_15 extends Struct {
+   f_4 = field(U32, {
+     custom: (ctx) => {
+       ctx.walk();
++      // Bit-merge f_4 into the low 27 bits, keeping bits 27..31 (was masking them away)
+       ctx.set(this.count2, (ctx) =>
+-        ctx.band(
+-          (ctx) =>
+-            ctx.xor(this.count2, (ctx) => ctx.xor(this.count2, this.f_4)),
+-          0b00000111111111111111111111111111
++        ctx.xor(this.count2, (ctx) =>
++          ctx.band(
++            (ctx) => ctx.xor(this.count2, this.f_4),
++            0b00000111111111111111111111111111
++          )
+         )
+       );
+     },
+-- 
+2.54.0
+
