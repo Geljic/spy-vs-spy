@@ -1,0 +1,12 @@
+# Three club hits knock out the other spy.
+seed 7
+at 0.0 place black room 0 0 1.1
+at 0.0 move white south 0.02
+at 0.1 press white attack
+at 0.3 move white south 0.2
+at 0.7 press white attack
+at 0.9 move white south 0.2
+at 1.3 press white attack
+at 1.5 expect black state dead
+at 1.6 screenshot ../work/test_04.png
+at 2.0 end

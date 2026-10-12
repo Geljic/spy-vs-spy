@@ -1,0 +1,8 @@
+# The key is hidden in a piece of furniture; searching it finds the key.
+seed 7
+at 0.0 hide KEY furniture 0 of white
+at 0.0 place white furniture 0
+at 0.2 press white search
+at 1.5 expect white has KEY
+at 1.6 screenshot ../work/test_02.png
+at 2.0 end

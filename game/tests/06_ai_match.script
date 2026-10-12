@@ -1,0 +1,7 @@
+# Two AIs play a full match to the end without getting stuck or crashing.
+seed 3
+speed 40
+ai white on
+ai black on
+at 300.5 expect over
+at 300.6 end

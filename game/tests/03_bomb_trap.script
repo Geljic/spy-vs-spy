@@ -1,0 +1,11 @@
+# Black hides a bomb in furniture and leaves; White searches it and is blown up.
+seed 7
+at 0.0 place black room 0 2 2
+at 0.1 place black furniture 1
+at 0.2 press black trap
+at 0.5 place black room 8 0 0
+at 0.6 place white furniture 1
+at 0.7 press white search
+at 1.6 expect white state dead
+at 1.7 screenshot ../work/test_03.png
+at 2.0 end

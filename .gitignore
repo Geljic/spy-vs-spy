@@ -1,0 +1,23 @@
+# Whitelist: ignore everything, then allow only our own files
+*
+!*/
+!.gitignore
+!CLAUDE.md
+!README.md
+!agents/**
+!notes/**/*.md
+!tools/**/*.py
+!tools/**/*.java
+!tools/**/*.sh
+!tools/**/*.patch
+!notes/**/*.csv
+!src/**
+!game/**
+game/target/
+# never, even if whitelisted above
+work/
+*.iso
+*.mdf
+*.pak
+*.gzf
+*.rep
