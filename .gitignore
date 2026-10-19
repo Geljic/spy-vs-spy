@@ -4,6 +4,7 @@
 !.gitignore
 !CLAUDE.md
 !README.md
+!HANDOVER.md
 !agents/**
 !notes/**/*.md
 !tools/**/*.py
