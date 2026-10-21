@@ -1,12 +1,12 @@
 # Handover: spy-vs-spy
 
 Updated 2026-10-21 (evening) after the mission-2b wave: in-game HUD, weapons, and Mission 2 playable start to
-finish with stand-ins (branch `mission-2b` in `work/friend-SpyVsSpy`, commit `c6fdd32`, **not pushed**).
+finish with stand-ins (branch `mission-2b` in `work/friend-SpyVsSpy`, commit `c6fdd32`, pushed to LuckyDucko/SpyVsSpy 2026-10-21). Parked by Simon after the push.
 
 ## Start here (paste as the first prompt of the next session)
 > Continue spy-vs-spy (projects/spy-vs-spy). Read CLAUDE.md, HANDOVER.md, then in `work/friend-SpyVsSpy` read
 > `docs/MISSION2.md` ("Built (v1)") and `docs/NOTES.md` §9 (last 4 lines). Ask Simon whether `mission-2b` was pushed /
-> PR'd to LuckyDucko/SpyVsSpy; `git fetch` and rebase on Tyson's `mission-1` if he merged his loading/briefing fixes.
+> merged by Tyson; `git fetch` and rebase on Tyson's `mission-1` if he merged his loading/briefing fixes.
 > Run `ci/build_test.sh` (ALL PASS) + `poc/11_gameplay/run.sh m2` (PASS), then work down "Next" from 1.
 
 ## Team / split
@@ -33,7 +33,7 @@ finish with stand-ins (branch `mission-2b` in `work/friend-SpyVsSpy`, commit `c6
 - Our repo (github.com/Geljic/spy-vs-spy): HANDOVER + work log committed locally, not pushed.
 
 ## Next (priority order)
-1. **Push `mission-2b` + tell Tyson** (needs Simon's OK): HUD is shared — Mission 1 should call `st` the same way
+1. **Tell Tyson** (`mission-2b` pushed 2026-10-21): HUD is shared — Mission 1 should call `st` the same way
    (money/health/items/objective) instead of building its own.
 2. **Visible playtest** (`./play.sh` → Kooky Carnival) — nothing has been played in a window yet; tune feel,
    camera, weapon rates (all made up, commented in weapon.hpp / carnival2_play.hpp).
