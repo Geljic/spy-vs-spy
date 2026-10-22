@@ -11,6 +11,8 @@ FONT=/usr/share/fonts/google-noto/NotoSans-Bold.ttf
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 cd "$R"
 [ "${SKIP_CHECK:-0}" = 1 ] || poc/11_gameplay/run.sh m2 | tail -1
+RAW="${OUT%.mp4}.raw.mp4"
+if [ "${REUSE:-0}" = 1 ] && [ -s "$RAW" ]; then cp "$RAW" "$T/run.mp4"; else
 mkfifo "$T/f"
 ffmpeg -nostdin -loglevel error -y -f image2pipe -c:v ppm -framerate 30 -i "$T/f" -c:v libx264 -pix_fmt yuv420p -crf 20 "$T/run.mp4" > "$T/ff.log" 2>&1 &
 FF=$!
@@ -21,11 +23,13 @@ while kill -0 $BIN 2>/dev/null; do kill -0 $FF 2>/dev/null || { echo "ffmpeg die
 exec 3>&-
 wait $FF
 grep -c '^  ok' "$T/run.log" | sed 's/^/checks ok: /'
-read W H < <(ffprobe -v error -select_streams v -show_entries stream=width,height -of csv=p=0:s=' ' "$T/run.mp4")
-card() { # card <out> <seconds> <big line> <small line>
+cp "$T/run.mp4" "$RAW"; fi
+IFS=, read W H < <(ffprobe -v error -select_streams v -show_entries stream=width,height -of csv=p=0 "$T/run.mp4")
+card() { # card <out> <seconds> <big line> <small line>   (text via files: no filter escaping)
+  printf '%s' "$3" > "$T/t1"; printf '%s' "$4" > "$T/t2"
   ffmpeg -nostdin -loglevel error -y -f lavfi -i "color=c=0x101418:s=${W}x${H}:d=$2:r=30" -vf \
-    "drawtext=fontfile=$FONT:text='$3':fontcolor=white:fontsize=$((H/12)):x=(w-tw)/2:y=h/2-th,\
-drawtext=fontfile=$FONT:text='$4':fontcolor=0xb0c4d0:fontsize=$((H/26)):x=(w-tw)/2:y=h/2+$((H/20)),\
+    "drawtext=fontfile=$FONT:textfile=$T/t1:fontcolor=white:fontsize=$((H/12)):x=(w-tw)/2:y=h/2-th,\
+drawtext=fontfile=$FONT:textfile=$T/t2:fontcolor=0xb0c4d0:fontsize=$((H/26)):x=(w-tw)/2:y=h/2+$((H/20)),\
 fade=t=in:d=0.4,fade=t=out:st=$(echo "$2-0.4" | bc):d=0.4" -c:v libx264 -pix_fmt yuv420p "$1"; }
 card "$T/a.mp4" 3 "Spy vs. Spy - Mission 2" "$SUB"
 card "$T/b.mp4" 4 "$(git log -1 --format=%h) on $(git rev-parse --abbrev-ref HEAD)" "the player's own PS2 data, native PC engine"
